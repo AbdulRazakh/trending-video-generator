@@ -24,7 +24,7 @@ public class VideoGenerationService {
             File ffmpegFile = new File(ffmpegPath);
 
             if (!"ffmpeg".equalsIgnoreCase(ffmpegPath) && !ffmpegFile.exists()) {
-                throw new RuntimeException("FFmpeg not found at configured path: " + ffmpegPath);
+                throw new RuntimeException("FFmpeg not found at configured path:  " + ffmpegPath);
             }
 
             String fileName = "video_" + UUID.randomUUID() + ".mp4";
