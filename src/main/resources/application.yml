@@ -1,0 +1,35 @@
+server:
+  port: 9090
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:trendsdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  h2:
+    console:
+      enabled: true
+
+app:
+  rss:
+    feeds:
+      - https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
+  trends:
+    enabled: false
+    url: https://trends.google.com/trending/rss?geo=US
+  article:
+    maxPerFeed: 1
+  ranking:
+    topTopics: 1
+  video:
+    workspace: ./workspace
+    outputDir: ./workspace/output
+    ffmpegPath: C:\Users\DELL\Downloads\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
+  portal:
+    uploadUrl: http://localhost:9090/api/videos/upload
+    apiKey: demo-api-key
