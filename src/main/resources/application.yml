@@ -1,5 +1,5 @@
 server:
-  port: 9090
+  port: 7070
 
 spring:
   datasource:
@@ -31,5 +31,5 @@ app:
     outputDir: ./workspace/output
     ffmpegPath: C:\Users\DELL\Downloads\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
   portal:
-    uploadUrl: http://localhost:9090/api/videos/upload
+    uploadUrl: http://localhost:7070/api/videos/upload
     apiKey: demo-api-key
