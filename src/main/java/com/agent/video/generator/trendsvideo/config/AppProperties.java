@@ -10,22 +10,19 @@ import java.util.List;
 @Component
 @ConfigurationProperties(prefix = "app")
 public class AppProperties {
+
     private Rss rss;
-    private Trends trends;
     private Article article;
     private Ranking ranking;
     private Video video;
     private Portal portal;
+    private Ollama ollama;
+    private Unsplash unsplash;
+    private Edgetts edgetts;
 
     @Data
     public static class Rss {
         private List<String> feeds;
-    }
-
-    @Data
-    public static class Trends {
-        private boolean enabled;
-        private String url;
     }
 
     @Data
@@ -40,8 +37,8 @@ public class AppProperties {
 
     @Data
     public static class Video {
-        private String workspace;
         private String outputDir;
+        private String workspaceDir;
         private String ffmpegPath;
     }
 
@@ -49,5 +46,25 @@ public class AppProperties {
     public static class Portal {
         private String uploadUrl;
         private String apiKey;
+    }
+
+    @Data
+    public static class Ollama {
+        private String baseUrl;
+        private String model;
+        private int timeoutSeconds;
+    }
+
+    @Data
+    public static class Unsplash {
+        private String accessKey;
+    }
+
+    @Data
+    public static class Edgetts {
+        private String voice;
+        private String rate;
+        private String volume;
+        private String executablePath;
     }
 }

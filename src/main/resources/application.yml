@@ -10,26 +10,44 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
-    show-sql: true
+    show-sql: false
   h2:
     console:
       enabled: true
-
+  servlet:
+    multipart:
+      max-file-size: 500MB
+      max-request-size: 500MB
 app:
   rss:
     feeds:
       - https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
-  trends:
-    enabled: false
-    url: https://trends.google.com/trending/rss?geo=US
+      - https://feeds.bbci.co.uk/news/rss.xml
+#  trends:
+#    enabled: false
+#    url: https://trends.google.com/trending/rss?geo=US
   article:
-    maxPerFeed: 1
+    maxPerFeed: 5
   ranking:
-    topTopics: 1
+    topTopics: 3
   video:
-    workspace: ./workspace
-    outputDir: ./workspace/output
-    ffmpegPath: C:\Users\DELL\Downloads\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
+    outputDir: C:\Sham\trending_video_generator\video-output
+    workspaceDir: C:\Sham\trending_video_generator\video-workspace
+    ffmpegPath: C:\Sham\trending_video_generator\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
+#    workspace: C:\Sham\trending_video_generator
+#    outputDir: C:\Sham\trending_video_generator\video-output
+#    ffmpegPath: C:\Sham\trending_video_generator\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
   portal:
     uploadUrl: http://localhost:7070/api/videos/upload
     apiKey: demo-api-key
+  ollama:
+    baseUrl: http://localhost:11434
+    model: llama3.2:1b
+    timeoutSeconds: 120
+  unsplash:
+    accessKey: Sn0VddP4Y_hAPcXYDENpYIm1sm_w5IdwRfQR3fC86cQ
+  edgetts:
+    voice: en-US-AriaNeural
+    rate: "+0%"
+    volume: "+0%"
+    executablePath: C:/Users/shama/AppData/Local/Programs/Python/Python310/Scripts/edge-tts.exe
