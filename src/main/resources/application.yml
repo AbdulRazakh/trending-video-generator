@@ -3,7 +3,7 @@ server:
 
 spring:
   datasource:
-    url: jdbc:h2:mem:trendsdb
+    url: jdbc:h2:file:./data/trendsdb
     driver-class-name: org.h2.Driver
     username: sa
     password:
@@ -18,36 +18,50 @@ spring:
     multipart:
       max-file-size: 500MB
       max-request-size: 500MB
+
 app:
-  rss:
-    feeds:
-      - https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml
-      - https://feeds.bbci.co.uk/news/rss.xml
-#  trends:
-#    enabled: false
-#    url: https://trends.google.com/trending/rss?geo=US
+  newsapi:
+    apiKey: 7bc5dd66d8f74d0c8ebd9c8d8ba5cc6d          # free at newsapi.org
+    baseUrl: https://newsapi.org/v2
+    pageSize: 10                           # articles to fetch per category
+    language: en
+    categories: technology,business,science,health,general
+
   article:
-    maxPerFeed: 5
+    maxPerFeed: 10
+    minContentLength: 150                  # skip articles with less than 150 chars
+
   ranking:
     topTopics: 3
+
   video:
-    outputDir: C:\Sham\trending_video_generator\video-output
-    workspaceDir: C:\Sham\trending_video_generator\video-workspace
-    ffmpegPath: C:\Sham\trending_video_generator\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
-#    workspace: C:\Sham\trending_video_generator
-#    outputDir: C:\Sham\trending_video_generator\video-output
-#    ffmpegPath: C:\Sham\trending_video_generator\ffmpeg\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe
+    outputDir: C:/Sham/trending_video_generator/video-output
+    workspaceDir: C:/Sham/trending_video_generator/video-workspace
+    ffmpegPath: C:/Sham/trending_video_generator/ffmpeg/ffmpeg-master-latest-win64-gpl-shared/bin/ffmpeg.exe
+
   portal:
-    uploadUrl: http://localhost:7070/api/videos/upload
+    uploadUrl: http://localhost:7070/api/trends-video/test
     apiKey: demo-api-key
+
+  groq:
+    apiKey: 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         # free at console.groq.com
+    baseUrl: https://api.groq.com/openai/v1
+    model: llama3-70b-8192                 # fast, reliable, free tier
+
   ollama:
     baseUrl: http://localhost:11434
     model: llama3.2:1b
-    timeoutSeconds: 120
+    timeoutSeconds: 120                    # fallback if Groq fails
+
   unsplash:
     accessKey: Sn0VddP4Y_hAPcXYDENpYIm1sm_w5IdwRfQR3fC86cQ
+
   edgetts:
     voice: en-US-AriaNeural
     rate: "+0%"
     volume: "+0%"
     executablePath: C:/Users/shama/AppData/Local/Programs/Python/Python310/Scripts/edge-tts.exe
+
+logging:
+  level:
+    com.agent.video.generator: INFO

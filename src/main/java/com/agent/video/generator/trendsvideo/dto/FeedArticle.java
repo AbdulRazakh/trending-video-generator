@@ -19,5 +19,6 @@ public class FeedArticle {
     private String summary;
     private String fullText;
     private LocalDateTime publishedAt;
-    private List<String> keywords;
+    private List<String> keywords;    // extracted from title by NewsApiService
+    private String category;          // technology, business, science, etc.
 }

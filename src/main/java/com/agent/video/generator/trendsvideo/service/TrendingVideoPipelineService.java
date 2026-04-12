@@ -1,7 +1,6 @@
 package com.agent.video.generator.trendsvideo.service;
 
 import com.agent.video.generator.trendsvideo.dto.FeedArticle;
-import com.agent.video.generator.trendsvideo.dto.PortalUploadResponse;
 import com.agent.video.generator.trendsvideo.dto.TopicGroup;
 import com.agent.video.generator.trendsvideo.dto.VideoScriptJson;
 import com.agent.video.generator.trendsvideo.entity.GeneratedVideo;
@@ -11,7 +10,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.io.File;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -21,8 +19,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class TrendingVideoPipelineService {
 
-    private final RssFeedService rssFeedService;
-    private final ArticleExtractorService articleExtractorService;
+    private final NewsApiService newsApiService;           // replaces RssFeedService
     private final TopicRankingService topicRankingService;
     private final StoryMergeService storyMergeService;
     private final ScriptGeneratorService scriptGeneratorService;
@@ -30,21 +27,23 @@ public class TrendingVideoPipelineService {
     private final SceneAssemblyService sceneAssemblyService;
     private final VideoAssemblyService videoAssemblyService;
     private final VideoValidationService videoValidationService;
-    private final PortalUploadService portalUploadService;
     private final GeneratedVideoRepository generatedVideoRepository;
     private final ObjectMapper objectMapper;
 
     public void runPipeline() throws Exception {
         log.info("Pipeline started");
 
-        List<FeedArticle> rawArticles = rssFeedService.fetchArticles();
-        log.info("Fetched {} raw articles", rawArticles.size());
+        // Step 1: Fetch articles from NewsAPI (structured, clean content)
+        List<FeedArticle> articles = newsApiService.fetchArticles();
+        log.info("Fetched {} articles from NewsAPI", articles.size());
 
-        List<FeedArticle> enriched = rawArticles.stream()
-                .map(articleExtractorService::enrich)
-                .collect(Collectors.toList());
+        if (articles.isEmpty()) {
+            log.warn("No articles fetched — check NewsAPI key in application.yml");
+            return;
+        }
 
-        List<TopicGroup> topTopics = topicRankingService.rankTopTopics(enriched);
+        // Step 2: Rank and group top topics
+        List<TopicGroup> topTopics = topicRankingService.rankTopTopics(articles);
         log.info("Processing {} top topics", topTopics.size());
 
         for (TopicGroup topic : topTopics) {
@@ -52,31 +51,32 @@ public class TrendingVideoPipelineService {
                 log.info("--- Topic: {} ---", topic.getTopic());
                 String mergedStory = storyMergeService.mergeToNarrative(topic);
 
+                // Step 3: Generate script via Groq (primary) or Ollama (fallback)
                 VideoScriptJson script = scriptGeneratorService.generateEnglishScript(topic, mergedStory);
                 scriptValidationService.validate(script);
+                log.info("Script: '{}' ({} scenes)", script.getTitle(), script.getScenes().size());
 
+                // Step 4: Assemble scene clips (TTS + Unsplash + FFmpeg Ken Burns)
                 List<String> sceneClips = sceneAssemblyService.assembleSceneClips(script);
+
+                // Step 5: Concatenate all scenes into final MP4
                 String videoPath = videoAssemblyService.concatenateScenes(sceneClips);
                 videoValidationService.validate(videoPath);
 
-//                PortalUploadResponse uploadResponse = portalUploadService.uploadVideo(
-//                        new File(videoPath), script.getTitle());
-//
-//                GeneratedVideo generatedVideo = new GeneratedVideo();
-//                generatedVideo.setTopicTitle(script.getTitle());
-//                generatedVideo.setScriptJson(objectMapper.writeValueAsString(script));
-//                generatedVideo.setVideoPath(videoPath);
-//                generatedVideo.setUploadStatus(uploadResponse != null ? uploadResponse.getStatus() : "FAILED");
-//                generatedVideo.setPortalVideoId(uploadResponse != null ? uploadResponse.getVideoId() : null);
-//                generatedVideo.setPortalUrl(uploadResponse != null ? uploadResponse.getUrl() : null);
-//                generatedVideo.setCreatedAt(LocalDateTime.now());
-//                generatedVideoRepository.save(generatedVideo);
+                // Step 6: Persist to DB
+                GeneratedVideo record = new GeneratedVideo();
+                record.setTopicTitle(script.getTitle());
+                record.setScriptJson(objectMapper.writeValueAsString(script));
+                record.setVideoPath(videoPath);
+                record.setUploadStatus("LOCAL");
+                record.setCreatedAt(LocalDateTime.now());
+                generatedVideoRepository.save(record);
 
-                log.info("Topic complete: {} -> {}", topic.getTopic(), videoPath);
+                log.info("Topic complete: '{}' -> {}", topic.getTopic(), videoPath);
 
             } catch (Exception e) {
                 log.error("Failed to process topic '{}': {}", topic.getTopic(), e.getMessage(), e);
-                // Continue with next topic instead of aborting entire pipeline
+                // Continue with next topic
             }
         }
 

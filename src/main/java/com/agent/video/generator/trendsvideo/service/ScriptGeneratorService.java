@@ -11,11 +11,15 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Generates video scripts using Groq API (primary) with Ollama as fallback.
+ *
+ * Groq: free at console.groq.com — llama3-70b produces clean JSON, no apostrophe issues.
+ * Ollama: kept as local fallback when Groq rate limit hit or unavailable.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
@@ -25,355 +29,364 @@ public class ScriptGeneratorService {
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
 
-    // Minimum summary length to bother calling Ollama
-    private static final int MIN_SUMMARY_FOR_OLLAMA = 300;
+    private static final int MIN_CONTENT_FOR_LLM = 200;
 
     public VideoScriptJson generateEnglishScript(TopicGroup topic, String mergedStory) {
-        log.info("Calling Ollama for script on topic: {}", topic.getTopic());
+        log.info("Generating script for topic: {}", topic.getTopic());
 
-        String cleanedSummary = extractCleanSummary(topic.getArticles());
+        String cleanContent = extractCleanContent(topic.getArticles());
         String realTitle = extractRealTitle(topic.getArticles());
         String keywords = extractKeywords(topic.getArticles());
+        String sourceName = extractSourceName(topic.getArticles());
 
-        log.info("Clean summary length: {}", cleanedSummary.length());
+        log.info("Content length: {} chars, source: {}", cleanContent.length(), sourceName);
 
-        // If summary is too short, skip Ollama — just build directly from real text
-        if (cleanedSummary.length() < MIN_SUMMARY_FOR_OLLAMA) {
-            log.info("Summary too short for Ollama — building script directly from article text");
-            return buildDirectScript(realTitle, cleanedSummary, keywords, topic.getTopic());
+        // Skip LLM entirely for very short content — build direct from article text
+        if (cleanContent.length() < MIN_CONTENT_FOR_LLM) {
+            log.info("Content too short for LLM — building direct script");
+            return buildDirectScript(realTitle, cleanContent, keywords, topic.getTopic());
         }
 
-        try {
-            String prompt = buildPrompt(realTitle, cleanedSummary, keywords);
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            Map<String, Object> requestBody = Map.of(
-                    "model", appProperties.getOllama().getModel(),
-                    "prompt", prompt,
-                    "stream", false,
-                    "options", Map.of(
-                            "temperature", 0.5,       // lower = more consistent output
-                            "num_predict", 2000
-                    )
-            );
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    appProperties.getOllama().getBaseUrl() + "/api/generate",
-                    HttpMethod.POST,
-                    new HttpEntity<>(requestBody, headers),
-                    Map.class
-            );
-
-            String rawText = (String) response.getBody().get("response");
-            String cleanedJson = extractAndSanitizeJson(rawText);
-            VideoScriptJson script = objectMapper.readValue(cleanedJson, VideoScriptJson.class);
-            repairScript(script, realTitle, cleanedSummary, keywords, topic.getTopic());
-            log.info("Ollama script generated successfully for: {}", topic.getTopic());
-            return script;
-
-        } catch (Exception e) {
-            log.error("Ollama failed, building direct script: {}", e.getMessage());
-            return buildDirectScript(realTitle, cleanedSummary, keywords, topic.getTopic());
+        // Try Groq first (fast, reliable, free)
+        AppProperties.Groq groqCfg = appProperties.getGroq();
+        if (groqCfg != null && groqCfg.getApiKey() != null && !groqCfg.getApiKey().startsWith("YOUR_")) {
+            try {
+                VideoScriptJson script = callGroq(realTitle, cleanContent, keywords, topic.getTopic());
+                repairScript(script, realTitle, cleanContent, keywords, topic.getTopic());
+                log.info("Groq script generated successfully for: {}", topic.getTopic());
+                return script;
+            } catch (Exception e) {
+                log.warn("Groq failed ({}), trying Ollama fallback", e.getMessage());
+            }
         }
+
+        // Fallback to Ollama
+        AppProperties.Ollama ollamaCfg = appProperties.getOllama();
+        if (ollamaCfg != null) {
+            try {
+                VideoScriptJson script = callOllama(realTitle, cleanContent, keywords, topic.getTopic());
+                repairScript(script, realTitle, cleanContent, keywords, topic.getTopic());
+                log.info("Ollama script generated for: {}", topic.getTopic());
+                return script;
+            } catch (Exception e) {
+                log.warn("Ollama failed ({}), using direct script", e.getMessage());
+            }
+        }
+
+        // Final fallback — always works
+        log.info("Using direct script for: {}", topic.getTopic());
+        return buildDirectScript(realTitle, cleanContent, keywords, topic.getTopic());
     }
 
-    // ─── DIRECT SCRIPT — no Ollama, pure article text ────────────────────────────
+    // ─── GROQ API ────────────────────────────────────────────────────────────────
+
+    private VideoScriptJson callGroq(String title, String content, String keywords, String topic) throws Exception {
+        AppProperties.Groq cfg = appProperties.getGroq();
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(cfg.getApiKey());
+
+        String systemPrompt = "You are a professional news video scriptwriter. "
+            + "You always return valid JSON only. "
+            + "Never use apostrophes in contractions — write 'it is' not 'it's'. "
+            + "Never use double quotes inside string values. "
+            + "Return exactly 3 scenes, no more, no less.";
+
+        String userPrompt = buildPrompt(title, content, keywords);
+
+        Map<String, Object> requestBody = Map.of(
+            "model", cfg.getModel(),
+            "messages", List.of(
+                Map.of("role", "system", "content", systemPrompt),
+                Map.of("role", "user", "content", userPrompt)
+            ),
+            "temperature", 0.4,
+            "max_tokens", 1500,
+            "response_format", Map.of("type", "json_object")  // forces valid JSON output
+        );
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+            cfg.getBaseUrl() + "/chat/completions",
+            HttpMethod.POST,
+            new HttpEntity<>(requestBody, headers),
+            Map.class
+        );
+
+        Map body = response.getBody();
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) body.get("choices");
+        Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
+        String rawJson = (String) message.get("content");
+
+        log.debug("Groq raw response: {}", rawJson);
+        return objectMapper.readValue(sanitizeJson(rawJson), VideoScriptJson.class);
+    }
+
+    // ─── OLLAMA API ───────────────────────────────────────────────────────────────
+
+    private VideoScriptJson callOllama(String title, String content, String keywords, String topic) throws Exception {
+        AppProperties.Ollama cfg = appProperties.getOllama();
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        Map<String, Object> requestBody = Map.of(
+            "model", cfg.getModel(),
+            "prompt", buildPrompt(title, content, keywords),
+            "stream", false,
+            "options", Map.of("temperature", 0.4, "num_predict", 2000)
+        );
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+            cfg.getBaseUrl() + "/api/generate",
+            HttpMethod.POST,
+            new HttpEntity<>(requestBody, headers),
+            Map.class
+        );
+
+        String rawText = (String) response.getBody().get("response");
+        String cleanedJson = extractAndSanitizeJson(rawText);
+        return objectMapper.readValue(cleanedJson, VideoScriptJson.class);
+    }
+
+    // ─── PROMPT ──────────────────────────────────────────────────────────────────
+
+    private String buildPrompt(String title, String content, String keywords) {
+        String safeContent = stripQuotes(content.length() > 1500 ? content.substring(0, 1500) : content);
+        List<String> sentences = splitSentences(safeContent);
+
+        String hook    = joinRange(sentences, 0, 2);
+        String facts   = joinRange(sentences, 2, 6);
+        String closing = joinRange(sentences, Math.max(0, sentences.size() - 2), sentences.size());
+
+        return "Write a 30-second news video script as JSON for this article.\n\n"
+            + "HEADLINE: " + stripQuotes(title) + "\n\n"
+            + "ARTICLE CONTENT:\n" + safeContent + "\n\n"
+            + "IMAGE KEYWORDS: " + keywords + "\n\n"
+            + "RULES:\n"
+            + "- Return ONLY the JSON object, nothing else\n"
+            + "- Use only words from the article for narration — do not invent facts\n"
+            + "- No apostrophes: write 'it is' not 'it's', 'does not' not 'don't'\n"
+            + "- No double quotes inside string values\n"
+            + "- imageHints: pick 1-2 single words from image keywords above\n"
+            + "- Exactly 3 scenes\n\n"
+            + "BASE NARRATION ON THESE SENTENCES:\n"
+            + "Hook: " + hook + "\n"
+            + "Facts: " + facts + "\n"
+            + "Closing: " + closing + "\n\n"
+            + "RETURN THIS JSON STRUCTURE:\n"
+            + "{\n"
+            + "  \"title\": \"" + truncate(stripQuotes(title), 55) + "\",\n"
+            + "  \"language\": \"en\",\n"
+            + "  \"narrationStyle\": \"professional news anchor\",\n"
+            + "  \"scenes\": [\n"
+            + "    {\"heading\":\"Hook\",\"narration\":\"[8 seconds from hook sentences]\","
+            + "\"visualPrompt\":\"[real scene for this story]\","
+            + "\"durationSeconds\":8,\"imageHints\":[\"[keyword]\",\"[keyword]\"]},\n"
+            + "    {\"heading\":\"Key facts\",\"narration\":\"[16 seconds from facts sentences]\","
+            + "\"visualPrompt\":\"[real scene for this story]\","
+            + "\"durationSeconds\":16,\"imageHints\":[\"[keyword]\",\"[keyword]\"]},\n"
+            + "    {\"heading\":\"Closing\",\"narration\":\"[7 seconds from closing sentences]\","
+            + "\"visualPrompt\":\"[real scene for this story]\","
+            + "\"durationSeconds\":7,\"imageHints\":[\"[keyword]\",\"[keyword]\"]}\n"
+            + "  ]\n"
+            + "}";
+    }
+
+    // ─── DIRECT SCRIPT — no LLM ──────────────────────────────────────────────────
 
     /**
-     * Builds a script directly from article sentences — no LLM needed.
-     * Guaranteed to always produce valid narration from real content.
+     * Builds script directly from article sentences.
+     * Guaranteed to always produce valid, non-blank content.
      */
-    private VideoScriptJson buildDirectScript(String realTitle, String cleanedSummary,
-                                              String keywords, String topic) {
-        List<String> sentences = splitSentences(cleanedSummary);
-
-        // Pad sentences if too few
+    private VideoScriptJson buildDirectScript(String title, String content,
+                                               String keywords, String topic) {
+        List<String> sentences = splitSentences(content);
         while (sentences.size() < 6) {
             sentences.add("This story about " + topic + " continues to develop.");
         }
 
-        String hookNarration = joinRange(sentences, 0, 2);
-        String factsNarration = joinRange(sentences, 2, 6);
-        String closingNarration = joinRange(sentences, Math.max(0, sentences.size() - 2), sentences.size());
-
-        List<String> kwList = List.of(keywords.split(",\\s*"));
+        List<String> kwList = parseKeywords(keywords);
 
         VideoScriptJson script = new VideoScriptJson();
-        script.setTitle(truncate(realTitle, 60));
+        script.setTitle(truncate(title, 60));
         script.setLanguage("en");
         script.setNarrationStyle("professional news anchor");
 
         VideoScriptJson.SceneJson hook = new VideoScriptJson.SceneJson();
         hook.setHeading("Hook");
-        hook.setNarration(ensureNotBlank(hookNarration, "Breaking news on " + topic));
-        hook.setVisualPrompt("breaking news broadcast, dramatic studio lighting, camera zoom in");
+        hook.setNarration(ensureNotBlank(joinRange(sentences, 0, 2), "Breaking story: " + topic));
+        hook.setVisualPrompt("breaking news broadcast, dramatic studio lighting");
         hook.setDurationSeconds(8);
-        hook.setImageHints(safeKeywords(kwList, 0, 1, topic));
+        hook.setImageHints(safeHints(kwList, 0, 2, topic));
 
         VideoScriptJson.SceneJson facts = new VideoScriptJson.SceneJson();
         facts.setHeading("Key facts");
-        facts.setNarration(ensureNotBlank(factsNarration, "Details are emerging about " + topic));
-        facts.setVisualPrompt("documentary footage, people affected, key locations related to story");
+        facts.setNarration(ensureNotBlank(joinRange(sentences, 2, 6), "Details emerging about " + topic));
+        facts.setVisualPrompt("documentary footage, relevant locations, people affected");
         facts.setDurationSeconds(16);
-        facts.setImageHints(safeKeywords(kwList, 2, 3, topic));
+        facts.setImageHints(safeHints(kwList, 2, 4, topic));
 
         VideoScriptJson.SceneJson closing = new VideoScriptJson.SceneJson();
         closing.setHeading("Closing");
-        closing.setNarration(ensureNotBlank(closingNarration, "Developments in " + topic + " are expected to continue."));
-        closing.setVisualPrompt("wide establishing shot, calm reflective mood, related to story");
+        closing.setNarration(ensureNotBlank(
+            joinRange(sentences, Math.max(0, sentences.size() - 2), sentences.size()),
+            "This story continues to develop."
+        ));
+        closing.setVisualPrompt("wide establishing shot, calm reflective mood");
         closing.setDurationSeconds(7);
-        closing.setImageHints(safeKeywords(kwList, 0, 2, topic));
+        closing.setImageHints(safeHints(kwList, 0, 2, topic));
 
         script.setScenes(List.of(hook, facts, closing));
         return script;
     }
 
-    // ─── REPAIR — fixes Ollama output issues ─────────────────────────────────────
+    // ─── CONTENT EXTRACTION ──────────────────────────────────────────────────────
 
-    private void repairScript(VideoScriptJson script, String realTitle, String cleanedSummary,
-                              String keywords, String topic) {
-        if (script.getTitle() == null || script.getTitle().isBlank()) {
-            script.setTitle(truncate(realTitle, 60));
-        }
-        if (script.getLanguage() == null || script.getLanguage().isBlank()) {
-            script.setLanguage("en");
-        }
-        if (script.getNarrationStyle() == null || script.getNarrationStyle().isBlank()) {
-            script.setNarrationStyle("professional news anchor");
-        }
-
-        List<VideoScriptJson.SceneJson> scenes = script.getScenes();
-        if (scenes == null || scenes.isEmpty()) {
-            script.setScenes(buildDirectScript(realTitle, cleanedSummary, keywords, topic).getScenes());
-            return;
-        }
-
-        // Trim to max 3
-        if (scenes.size() > 3) {
-            script.setScenes(new ArrayList<>(scenes.subList(0, 3)));
-            scenes = script.getScenes();
-        }
-
-        List<String> sentences = splitSentences(cleanedSummary);
-        while (sentences.size() < 6) {
-            sentences.add("This story continues to develop.");
-        }
-
-        String[] fallbackNarrations = {
-                joinRange(sentences, 0, 2),
-                joinRange(sentences, 2, 6),
-                joinRange(sentences, Math.max(0, sentences.size() - 2), sentences.size())
-        };
-        String[] fallbackVisuals = {
-                "breaking news broadcast studio dramatic lighting",
-                "documentary footage people affected by the story",
-                "wide establishing shot calm reflective mood"
-        };
-        String[] fallbackHeadings = {"Hook", "Key facts", "Closing"};
-        int[] fallbackDurations = {8, 16, 7};
-        List<String> kwList = List.of(keywords.split(",\\s*"));
-
-        // Pad to 3 scenes
-        while (scenes.size() < 3) {
-            int i = scenes.size();
-            VideoScriptJson.SceneJson s = new VideoScriptJson.SceneJson();
-            s.setHeading(fallbackHeadings[i]);
-            s.setNarration(fallbackNarrations[i]);
-            s.setVisualPrompt(fallbackVisuals[i]);
-            s.setDurationSeconds(fallbackDurations[i]);
-            s.setImageHints(safeKeywords(kwList, i, i + 1, topic));
-            scenes.add(s);
-        }
-
-        // Fix each scene
-        for (int i = 0; i < scenes.size(); i++) {
-            VideoScriptJson.SceneJson scene = scenes.get(i);
-            if (scene.getHeading() == null || scene.getHeading().isBlank())
-                scene.setHeading(fallbackHeadings[i]);
-            if (scene.getNarration() == null || scene.getNarration().isBlank())
-                scene.setNarration(ensureNotBlank(fallbackNarrations[i], "Developing story about " + topic));
-            if (scene.getVisualPrompt() == null || scene.getVisualPrompt().isBlank())
-                scene.setVisualPrompt(fallbackVisuals[i]);
-            if (scene.getDurationSeconds() <= 0)
-                scene.setDurationSeconds(fallbackDurations[i]);
-            if (scene.getImageHints() == null || scene.getImageHints().isEmpty())
-                scene.setImageHints(safeKeywords(kwList, i, i + 1, topic));
-        }
-    }
-
-    // ─── PROMPT ──────────────────────────────────────────────────────────────────
-
-    private String buildPrompt(String realTitle, String cleanedSummary, String keywords) {
-        String summary = cleanedSummary.length() > 1500
-                ? cleanedSummary.substring(0, 1500) : cleanedSummary;
-
-        List<String> sentences = splitSentences(summary);
-        String hook = stripInnerQuotes(joinRange(sentences, 0, 2));
-        String facts = stripInnerQuotes(joinRange(sentences, 2, 6));
-        String closing = stripInnerQuotes(joinRange(sentences,
-                Math.max(0, sentences.size() - 2), sentences.size()));
-
-        return "You are a news video scriptwriter. Write a 30 second video script as JSON.\n\n"
-                + "TITLE: " + stripInnerQuotes(realTitle) + "\n\n"
-                + "ARTICLE SUMMARY:\n" + stripInnerQuotes(summary) + "\n\n"
-                + "KEYWORDS FOR IMAGES: " + keywords + "\n\n"
-                + "RULES:\n"
-                + "- Return ONLY raw JSON. No markdown. No explanation.\n"
-                + "- Never use apostrophes. Write: it is, do not, cannot\n"
-                + "- Never use double quotes inside string values\n"
-                + "- imageHints must be single simple words from the keywords list\n"
-                + "- Write exactly 3 scenes, no more\n\n"
-                + "USE THESE SENTENCES FOR NARRATION:\n"
-                + "Hook: " + hook + "\n"
-                + "Facts: " + facts + "\n"
-                + "Closing: " + closing + "\n\n"
-                + "JSON:\n"
-                + "{\n"
-                + "  \"title\": \"" + truncate(stripInnerQuotes(realTitle), 50) + "\",\n"
-                + "  \"language\": \"en\",\n"
-                + "  \"narrationStyle\": \"professional news anchor\",\n"
-                + "  \"scenes\": [\n"
-                + "    {\"heading\": \"Hook\", \"narration\": \"REPLACE WITH HOOK NARRATION\","
-                + " \"visualPrompt\": \"REPLACE WITH REAL VISUAL\","
-                + " \"durationSeconds\": 8, \"imageHints\": [\"keyword1\", \"keyword2\"]},\n"
-                + "    {\"heading\": \"Key facts\", \"narration\": \"REPLACE WITH FACTS NARRATION\","
-                + " \"visualPrompt\": \"REPLACE WITH REAL VISUAL\","
-                + " \"durationSeconds\": 16, \"imageHints\": [\"keyword1\", \"keyword2\"]},\n"
-                + "    {\"heading\": \"Closing\", \"narration\": \"REPLACE WITH CLOSING NARRATION\","
-                + " \"visualPrompt\": \"REPLACE WITH REAL VISUAL\","
-                + " \"durationSeconds\": 7, \"imageHints\": [\"keyword1\", \"keyword2\"]}\n"
-                + "  ]\n"
-                + "}";
-    }
-
-    // ─── TEXT CLEANING ────────────────────────────────────────────────────────────
-
-    private String extractCleanSummary(List<FeedArticle> articles) {
+    private String extractCleanContent(List<FeedArticle> articles) {
         return articles.stream()
-                .map(a -> {
-                    String text = a.getFullText() != null && a.getFullText().length() > 200
-                            ? a.getFullText() : a.getSummary();
-                    return cleanText(text);
-                })
-                .filter(t -> t != null && t.length() > 30)
-                .findFirst()
-                .orElse(articles.stream()
-                        .map(a -> cleanText(a.getSummary()))
-                        .filter(t -> t != null && !t.isBlank())
-                        .collect(Collectors.joining(" ")));
-    }
-
-    private String cleanText(String raw) {
-        if (raw == null) return "";
-
-        String[] navMarkers = {
-                "Live Weather Newsletters", "Live News Live Sport",
-                "Discover the World Live", "Skip to content",
-                "Home News Sport Business"
-        };
-        String text = raw;
-        for (String marker : navMarkers) {
-            int idx = text.lastIndexOf(marker);
-            if (idx != -1) text = text.substring(idx + marker.length());
-        }
-
-        text = text
-                .replaceAll("BBC [A-Z][a-zA-Z]+", "")
-                .replaceAll("\\b(Share|Save|Subscribe|Watch|Listen|Read more)\\b", "")
-                .replaceAll("\\d+ (hours?|minutes?|days?) ago", "")
-                .replaceAll("\\s{2,}", " ")
-                .trim();
-
-        String[] sentences = text.split("(?<=[.!?])\\s+");
-        StringBuilder result = new StringBuilder();
-        for (String sentence : sentences) {
-            sentence = sentence.trim();
-            if (sentence.length() > 20 && sentence.split("\\s+").length > 4) {
-                result.append(sentence).append(" ");
-                if (result.length() > 1500) break;
-            }
-        }
-        return result.toString().trim();
+            .map(a -> {
+                // NewsAPI provides clean content directly — no nav menu scraping needed
+                String text = a.getFullText() != null && a.getFullText().length() > 100
+                        ? a.getFullText() : a.getSummary();
+                return text != null ? text.trim() : "";
+            })
+            .filter(t -> t.length() > 50)
+            .collect(Collectors.joining(" "))
+            .replaceAll("\\s{2,}", " ")
+            .trim();
     }
 
     private String extractRealTitle(List<FeedArticle> articles) {
         return articles.stream()
-                .map(FeedArticle::getTitle)
-                .filter(t -> t != null && !t.isBlank())
-                .map(t -> t.replace("'", "").replace("\u2018", "").replace("\u2019", ""))
-                .findFirst()
-                .orElse("Breaking News");
+            .map(FeedArticle::getTitle)
+            .filter(t -> t != null && !t.isBlank())
+            .map(t -> t.replace("'", "").replace("\u2018", "").replace("\u2019", ""))
+            .findFirst()
+            .orElse("Breaking News");
+    }
+
+    private String extractSourceName(List<FeedArticle> articles) {
+        return articles.stream()
+            .map(FeedArticle::getSource)
+            .filter(s -> s != null && !s.isBlank())
+            .findFirst()
+            .orElse("NewsAPI");
     }
 
     private String extractKeywords(List<FeedArticle> articles) {
         List<String> stopWords = List.of(
-                "the","a","an","and","or","but","in","on","at","to","for","of",
-                "with","is","are","was","were","be","been","have","has","had",
-                "do","does","did","will","would","can","could","may","might",
-                "why","how","what","who","when","where","that","this","it","its"
+            "the","a","an","and","or","but","in","on","at","to","for","of",
+            "with","is","are","was","were","be","been","have","has","had",
+            "do","does","did","will","would","can","could","may","might",
+            "why","how","what","who","when","where","that","this","it","its"
         );
         return articles.stream()
-                .map(FeedArticle::getTitle)
-                .filter(t -> t != null && !t.isBlank())
-                .flatMap(t -> List.of(t.split("\\s+")).stream())
-                .map(w -> w.replaceAll("[^a-zA-Z]", "").toLowerCase())
-                .filter(w -> w.length() > 3)
-                .filter(w -> !stopWords.contains(w))
-                .distinct()
-                .limit(6)
-                .collect(Collectors.joining(", "));
+            .map(FeedArticle::getTitle)
+            .filter(t -> t != null && !t.isBlank())
+            .flatMap(t -> Arrays.stream(t.split("\\s+")))
+            .map(w -> w.replaceAll("[^a-zA-Z]", "").toLowerCase())
+            .filter(w -> w.length() > 3 && !stopWords.contains(w))
+            .distinct()
+            .limit(8)
+            .collect(Collectors.joining(", "));
     }
 
-    // ─── JSON EXTRACTION ─────────────────────────────────────────────────────────
+    // ─── REPAIR ──────────────────────────────────────────────────────────────────
+
+    private void repairScript(VideoScriptJson script, String title, String content,
+                               String keywords, String topic) {
+        if (script.getTitle() == null || script.getTitle().isBlank())
+            script.setTitle(truncate(title, 60));
+        if (script.getLanguage() == null || script.getLanguage().isBlank())
+            script.setLanguage("en");
+        if (script.getNarrationStyle() == null || script.getNarrationStyle().isBlank())
+            script.setNarrationStyle("professional news anchor");
+
+        List<VideoScriptJson.SceneJson> scenes = script.getScenes();
+        if (scenes == null || scenes.isEmpty()) {
+            script.setScenes(buildDirectScript(title, content, keywords, topic).getScenes());
+            return;
+        }
+
+        if (scenes.size() > 3) script.setScenes(new ArrayList<>(scenes.subList(0, 3)));
+
+        List<String> sentences = splitSentences(content);
+        while (sentences.size() < 6) sentences.add("This story continues to develop.");
+
+        String[] fallbackNarrations = {
+            joinRange(sentences, 0, 2),
+            joinRange(sentences, 2, 6),
+            joinRange(sentences, Math.max(0, sentences.size() - 2), sentences.size())
+        };
+        String[] fallbackVisuals = {
+            "breaking news broadcast studio dramatic lighting",
+            "documentary footage people affected by the story",
+            "wide establishing shot calm reflective mood"
+        };
+        String[] headings = {"Hook", "Key facts", "Closing"};
+        int[] durations = {8, 16, 7};
+        List<String> kwList = parseKeywords(keywords);
+
+        while (script.getScenes().size() < 3) {
+            int i = script.getScenes().size();
+            VideoScriptJson.SceneJson s = new VideoScriptJson.SceneJson();
+            s.setHeading(headings[i]);
+            s.setNarration(fallbackNarrations[i]);
+            s.setVisualPrompt(fallbackVisuals[i]);
+            s.setDurationSeconds(durations[i]);
+            s.setImageHints(safeHints(kwList, i, i + 2, topic));
+            script.getScenes().add(s);
+        }
+
+        for (int i = 0; i < script.getScenes().size(); i++) {
+            VideoScriptJson.SceneJson s = script.getScenes().get(i);
+            if (s.getHeading() == null || s.getHeading().isBlank()) s.setHeading(headings[i]);
+            if (s.getNarration() == null || s.getNarration().isBlank())
+                s.setNarration(ensureNotBlank(fallbackNarrations[i], "Story: " + topic));
+            if (s.getVisualPrompt() == null || s.getVisualPrompt().isBlank())
+                s.setVisualPrompt(fallbackVisuals[i]);
+            if (s.getDurationSeconds() <= 0) s.setDurationSeconds(durations[i]);
+            if (s.getImageHints() == null || s.getImageHints().isEmpty())
+                s.setImageHints(safeHints(kwList, i, i + 2, topic));
+        }
+    }
+
+    // ─── JSON SANITIZATION ────────────────────────────────────────────────────────
 
     private String extractAndSanitizeJson(String raw) {
-        if (raw == null || raw.isBlank())
-            throw new RuntimeException("Empty Ollama response");
-
-        raw = raw.replaceAll("(?s)```json\\s*", "")
-                .replaceAll("(?s)```\\s*", "").trim();
-
+        if (raw == null || raw.isBlank()) throw new RuntimeException("Empty response");
+        raw = raw.replaceAll("(?s)```json\\s*", "").replaceAll("(?s)```\\s*", "").trim();
         int start = raw.indexOf('{');
         int end = raw.lastIndexOf('}');
-        if (start == -1 || end == -1)
-            throw new RuntimeException("No JSON found in Ollama response");
-
+        if (start == -1 || end == -1) throw new RuntimeException("No JSON in response");
         return sanitizeJson(raw.substring(start, end + 1));
     }
 
     private String sanitizeJson(String json) {
-        json = json
-                .replace('\u2018', '\'').replace('\u2019', '\'')
-                .replace('\u201C', '"').replace('\u201D', '"');
+        json = json.replace('\u2018','\'').replace('\u2019','\'')
+                   .replace('\u201C','"').replace('\u201D','"');
 
         StringBuilder result = new StringBuilder();
-        boolean inString = false;
-        boolean escaped = false;
+        boolean inString = false, escaped = false;
 
         for (int i = 0; i < json.length(); i++) {
             char c = json.charAt(i);
             if (escaped) { result.append(c); escaped = false; continue; }
             if (c == '\\') { escaped = true; result.append(c); continue; }
             if (c == '"') {
-                if (!inString) {
-                    inString = true;
-                    result.append(c);
-                } else {
-                    int next = peekNextNonSpace(json, i + 1);
-                    if (next == ':' || next == ',' || next == '}' || next == ']' || next == -1) {
-                        inString = false;
-                        result.append(c);
-                    } else {
-                        result.append("\\\"");
-                    }
+                if (!inString) { inString = true; result.append(c); }
+                else {
+                    int next = peekNext(json, i + 1);
+                    if (next==':' || next==',' || next=='}' || next==']' || next==-1) {
+                        inString = false; result.append(c);
+                    } else { result.append("\\\""); }
                 }
                 continue;
             }
             if (inString) {
-                if (c == '\'') { result.append("\u2019"); continue; }
-                if (c == '\n' || c == '\r' || c == '\t') { result.append(' '); continue; }
+                if (c=='\'') { result.append("\u2019"); continue; }
+                if (c=='\n'||c=='\r'||c=='\t') { result.append(' '); continue; }
                 if (c < 0x20) continue;
             }
             result.append(c);
@@ -381,9 +394,9 @@ public class ScriptGeneratorService {
         return result.toString();
     }
 
-    private int peekNextNonSpace(String json, int from) {
-        for (int i = from; i < json.length(); i++) {
-            char c = json.charAt(i);
+    private int peekNext(String s, int from) {
+        for (int i = from; i < s.length(); i++) {
+            char c = s.charAt(i);
             if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return c;
         }
         return -1;
@@ -403,9 +416,8 @@ public class ScriptGeneratorService {
 
     private String joinRange(List<String> sentences, int from, int to) {
         StringBuilder sb = new StringBuilder();
-        for (int i = from; i < Math.min(to, sentences.size()); i++) {
+        for (int i = from; i < Math.min(to, sentences.size()); i++)
             sb.append(sentences.get(i)).append(" ");
-        }
         return sb.toString().trim();
     }
 
@@ -418,20 +430,25 @@ public class ScriptGeneratorService {
         return text.length() <= max ? text : text.substring(0, max);
     }
 
-    private String stripInnerQuotes(String text) {
+    private String stripQuotes(String text) {
         if (text == null) return "";
-        return text.replace("\"", "").replace("\u201C", "").replace("\u201D", "")
-                .replaceAll("\\s{2,}", " ").trim();
+        return text.replace("\"","").replace("\u201C","").replace("\u201D","")
+                   .replaceAll("\\s{2,}"," ").trim();
     }
 
-    private List<String> safeKeywords(List<String> kwList, int from, int to, String topic) {
+    private List<String> parseKeywords(String keywords) {
+        if (keywords == null || keywords.isBlank()) return new ArrayList<>();
+        return Arrays.asList(keywords.split(",\\s*"));
+    }
+
+    private List<String> safeHints(List<String> kwList, int from, int to, String topic) {
         List<String> result = new ArrayList<>();
-        for (int i = from; i < Math.min(to + 1, kwList.size()); i++) {
+        for (int i = from; i < Math.min(to, kwList.size()); i++) {
             String kw = kwList.get(i).trim();
-            if (!kw.isBlank()) result.add(kw);
+            if (!kw.isBlank() && kw.length() > 2) result.add(kw);
         }
         if (result.isEmpty()) result.add(topic.split(" ")[0].toLowerCase());
         if (result.size() < 2) result.add("news");
-        return result;
+        return result.subList(0, Math.min(2, result.size()));
     }
 }
