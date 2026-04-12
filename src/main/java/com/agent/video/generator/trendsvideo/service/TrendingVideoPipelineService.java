@@ -59,18 +59,18 @@ public class TrendingVideoPipelineService {
                 String videoPath = videoAssemblyService.concatenateScenes(sceneClips);
                 videoValidationService.validate(videoPath);
 
-                PortalUploadResponse uploadResponse = portalUploadService.uploadVideo(
-                        new File(videoPath), script.getTitle());
-
-                GeneratedVideo generatedVideo = new GeneratedVideo();
-                generatedVideo.setTopicTitle(script.getTitle());
-                generatedVideo.setScriptJson(objectMapper.writeValueAsString(script));
-                generatedVideo.setVideoPath(videoPath);
-                generatedVideo.setUploadStatus(uploadResponse != null ? uploadResponse.getStatus() : "FAILED");
-                generatedVideo.setPortalVideoId(uploadResponse != null ? uploadResponse.getVideoId() : null);
-                generatedVideo.setPortalUrl(uploadResponse != null ? uploadResponse.getUrl() : null);
-                generatedVideo.setCreatedAt(LocalDateTime.now());
-                generatedVideoRepository.save(generatedVideo);
+//                PortalUploadResponse uploadResponse = portalUploadService.uploadVideo(
+//                        new File(videoPath), script.getTitle());
+//
+//                GeneratedVideo generatedVideo = new GeneratedVideo();
+//                generatedVideo.setTopicTitle(script.getTitle());
+//                generatedVideo.setScriptJson(objectMapper.writeValueAsString(script));
+//                generatedVideo.setVideoPath(videoPath);
+//                generatedVideo.setUploadStatus(uploadResponse != null ? uploadResponse.getStatus() : "FAILED");
+//                generatedVideo.setPortalVideoId(uploadResponse != null ? uploadResponse.getVideoId() : null);
+//                generatedVideo.setPortalUrl(uploadResponse != null ? uploadResponse.getUrl() : null);
+//                generatedVideo.setCreatedAt(LocalDateTime.now());
+//                generatedVideoRepository.save(generatedVideo);
 
                 log.info("Topic complete: {} -> {}", topic.getTopic(), videoPath);
 
