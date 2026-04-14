@@ -21,7 +21,7 @@ spring:
 
 app:
   newsapi:
-    apiKey: 7bc5dd66d8f74d0c8ebd9c8d8ba5cc6d          # free at newsapi.org
+    apiKey: <apikey>          # free at newsapi.org
     baseUrl: https://newsapi.org/v2
     pageSize: 10                           # articles to fetch per category
     language: en
@@ -44,7 +44,7 @@ app:
     apiKey: demo-api-key
 
   groq:
-    apiKey: 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         # free at console.groq.com
+    apiKey: <apikey>
     baseUrl: https://api.groq.com/openai/v1
     model: llama3-70b-8192                 # fast, reliable, free tier
 
@@ -54,7 +54,7 @@ app:
     timeoutSeconds: 120                    # fallback if Groq fails
 
   unsplash:
-    accessKey: Sn0VddP4Y_hAPcXYDENpYIm1sm_w5IdwRfQR3fC86cQ
+    accessKey: <accesskey>
 
   edgetts:
     voice: en-US-AriaNeural
