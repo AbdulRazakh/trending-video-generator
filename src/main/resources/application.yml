@@ -44,7 +44,6 @@ app:
     apiKey: demo-api-key
 
 #  groq:
-#    apiKey: <apikey>
 #    baseUrl: https://api.groq.com/openai/v1
 #    model: llama3-70b-8192                 # fast, reliable, free tier
 
